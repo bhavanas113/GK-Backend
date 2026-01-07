@@ -1,6 +1,6 @@
 const fastify = require('fastify')({ 
     logger: true,
-    trustProxy: true // Vercel/Cloud Proxy साठी आवश्यक
+    trustProxy: true 
 });
 const mysql = require('mysql2/promise');
 const cors = require('@fastify/cors');
@@ -9,10 +9,6 @@ const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
 require('dotenv').config();
-
-
-const uploadDir = 'uploads/';
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
 // 1. Register CORS
 fastify.register(cors, { origin: true });
@@ -25,30 +21,32 @@ fastify.addContentTypeParser('*', (req, payload, done) => {
 // 3. Register Multer Content Parser
 fastify.register(multer.contentParser);
 
+// Note: Static serving of /uploads will no longer work for NEW photos 
+// because they are now stored in the database.
 fastify.register(require('@fastify/static'), {
     root: path.join(__dirname, 'uploads'),
     prefix: '/uploads/', 
 });
 
-// --- UPDATED: DATABASE CONNECTION WITH SSL FOR AIVEN ---
+// --- DATABASE CONNECTION WITH SSL FOR AIVEN ---
 const db = mysql.createPool({
     host: process.env.DB_HOST,
-    port: process.env.DB_PORT || 20401, // Aiven चा पोर्ट इथे येईल
+    port: process.env.DB_PORT || 20401,
     user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD, // .env मध्ये DB_PASS ऐवजी DB_PASSWORD वापरणे योग्य
+    password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     ssl: {
-        rejectUnauthorized: false, // Aiven MySQL साठी हे अत्यंत आवश्यक आहे
-        minVersion: 'TLSv1.2'      // सुरक्षित कनेक्शनसाठी हे जोडा
+        rejectUnauthorized: false, 
+        minVersion: 'TLSv1.2'
     },
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    connectTimeout: 60000,         // UPDATED: फोटो अपलोडसाठी वेळ वाढवून ६० सेकंद केली
-    acquireTimeout: 60000          // UPDATED: कनेक्शन मिळवण्यासाठी वेळ वाढवली
+    connectTimeout: 60000,
+    acquireTimeout: 60000
 });
 
-// --- ADDED: HOME ROUTE TO FIX 404 ON VERCEL ---
+// --- HOME ROUTE ---
 fastify.get('/', async (request, reply) => {
     return { 
         success: true, 
@@ -62,16 +60,14 @@ const generateTripId = (name) => {
     return `GE-${name.substring(0,3).toUpperCase()}-${date}-${Math.floor(1000 + Math.random() * 9000)}`;
 };
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, 'uploads/'),
-    filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
+// --- UPDATED: USE MEMORY STORAGE TO FIX EROFS ERROR ---
+const storage = multer.memoryStorage();
 
-// --- UPDATED: MULTER LIMITS TO PREVENT TIMEOUT ---
+// --- MULTER LIMITS ---
 const upload = multer({ 
     storage,
     limits: {
-        fileSize: 10 * 1024 * 1024 // UPDATED: १० MB पर्यंत फोटोला परवानगी दिली
+        fileSize: 10 * 1024 * 1024 // 10 MB limit
     }
 });
 
@@ -96,7 +92,10 @@ fastify.get('/api/check-active-trip/:empId', async (request, reply) => {
 
 fastify.post('/api/start-trip', { preHandler: upload.single('photo') }, async (request, reply) => {
     const { empId, empName, vehicleNo, loading, unloading, material, partyName, locName, loading_date, captureTime } = request.body;
-    const photoPath = request.file ? `/uploads/${request.file.filename}` : null;
+    
+    // Convert buffer to Base64 string for database storage
+    const photoData = request.file ? `data:${request.file.mimetype};base64,${request.file.buffer.toString('base64')}` : null;
+    
     const tripId = generateTripId(empName);
     const finalTime = new Date(captureTime || new Date()).toISOString().slice(0, 19).replace('T', ' ');
     const finalLoadingDate = loading_date ? loading_date.split('T')[0] : new Date().toISOString().split('T')[0];
@@ -104,7 +103,7 @@ fastify.post('/api/start-trip', { preHandler: upload.single('photo') }, async (r
     await db.execute(
         `INSERT INTO trips (trip_id, employee_id, vehicle_no, loading_point, unloading_point, material, party_name, loading_photo, location_name, capture_time, status, loading_date) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)`,
-        [tripId, empId, vehicleNo, loading, unloading, material, partyName, photoPath, locName, finalTime, finalLoadingDate]
+        [tripId, empId, vehicleNo, loading, unloading, material, partyName, photoData, locName, finalTime, finalLoadingDate]
     );
     return { success: true, tripId };
 });
@@ -113,7 +112,7 @@ fastify.post('/api/complete-trip', { preHandler: upload.single('photo') }, async
     const { 
         tripId, travelKm, diesel, bhatta, toll, rto, other_exp, 
         party_number, 
-        unloading_date, captureTime 
+        unloading_date 
     } = request.body;
     
     const calculatedDriverBalance = 
@@ -123,7 +122,9 @@ fastify.post('/api/complete-trip', { preHandler: upload.single('photo') }, async
         Number(rto || 0) + 
         Number(other_exp || 0);
     
-    const photoPath = request.file ? `/uploads/${request.file.filename}` : null;
+    // Convert buffer to Base64 string for database storage
+    const photoData = request.file ? `data:${request.file.mimetype};base64,${request.file.buffer.toString('base64')}` : null;
+    
     const finalUnloadingDate = unloading_date ? unloading_date.split('T')[0] : new Date().toISOString().split('T')[0];
     
     await db.execute(
@@ -141,7 +142,7 @@ fastify.post('/api/complete-trip', { preHandler: upload.single('photo') }, async
             status = 'completed' 
          WHERE trip_id = ?`,
         [
-            photoPath, 
+            photoData, 
             travelKm, 
             Number(diesel || 0), 
             Number(bhatta || 0), 
@@ -165,7 +166,6 @@ fastify.post('/api/admin/party-details', async (request, reply) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Update/Insert Party Finance
         await connection.execute(
             `INSERT INTO party_details (party_name, mobile_no, total_amount, advance_paid) 
              VALUES (?, ?, ?, ?) 
@@ -176,11 +176,9 @@ fastify.post('/api/admin/party-details', async (request, reply) => {
             [name, mobile, Number(totalAmount || 0), Number(advance || 0)]
         );
 
-        // 2. Get the Primary Key ID for the log reference
         const [partyRow] = await connection.execute('SELECT id FROM party_details WHERE mobile_no = ?', [mobile]);
         const partyId = partyRow[0].id;
 
-        // 3. Insert Call Feedback into Logs
         if (feedback && feedback.trim() !== "") {
             await connection.execute(
                 'INSERT INTO party_call_logs (party_id, feedback_text) VALUES (?, ?)',
@@ -218,7 +216,7 @@ fastify.get('/api/admin/party/:mobile', async (request, reply) => {
     }
 });
 
-// --- UPDATED: GET ALL PARTIES WITH STATUS & REMINDERS ---
+// --- GET ALL PARTIES ---
 fastify.get('/api/admin/parties-all', async (request, reply) => {
     try {
         const [rows] = await db.execute(`
@@ -237,7 +235,7 @@ fastify.get('/api/admin/parties-all', async (request, reply) => {
     }
 });
 
-// --- ADDED: NEW OPTIMIZED REMINDER ROUTE FOR SIDEBAR ---
+// --- REMINDER ROUTE ---
 fastify.get('/api/admin/reminders', async (request, reply) => {
   try {
     const [rows] = await db.execute(`
@@ -252,7 +250,7 @@ fastify.get('/api/admin/reminders', async (request, reply) => {
   }
 });
 
-// --- ADDED: EDIT PARTY DETAILS ROUTE ---
+// --- EDIT PARTY DETAILS ---
 fastify.put('/api/admin/edit-party/:id', async (request, reply) => {
     const { id } = request.params;
     const { name, mobile, totalAmount, advance } = request.body;
@@ -295,7 +293,7 @@ fastify.delete('/api/admin/delete-party/:id', async (request, reply) => {
     }
 });
 
-// --- VERCEL ADAPTER (REQUIRED FOR DEPLOYMENT) ---
+// --- VERCEL ADAPTER ---
 const handler = async (req, res) => {
     await fastify.ready();
     fastify.server.emit('request', req, res);
@@ -303,7 +301,6 @@ const handler = async (req, res) => {
 
 const start = async () => {
     try {
-        // Vercel uses process.env.PORT
         await fastify.listen({ port: process.env.PORT || 5000, host: '0.0.0.0' });
         console.log(`✅ Backend is LIVE on port ${process.env.PORT || 5000}`);
     } catch (err) {
