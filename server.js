@@ -1,4 +1,7 @@
-const fastify = require('fastify')({ logger: true });
+const fastify = require('fastify')({ 
+    logger: true,
+    trustProxy: true // Vercel/Cloud Proxy साठी आवश्यक
+});
 const mysql = require('mysql2/promise');
 const cors = require('@fastify/cors');
 const multer = require('fastify-multer'); 
@@ -6,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
 require('dotenv').config();
+
 
 const uploadDir = 'uploads/';
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
@@ -26,11 +30,31 @@ fastify.register(require('@fastify/static'), {
     prefix: '/uploads/', 
 });
 
+// --- UPDATED: DATABASE CONNECTION WITH SSL FOR AIVEN ---
 const db = mysql.createPool({
     host: process.env.DB_HOST,
+    port: process.env.DB_PORT || 20401, // Aiven चा पोर्ट इथे येईल
     user: process.env.DB_USER,
-    password: process.env.DB_PASS,
-    database: process.env.DB_NAME
+    password: process.env.DB_PASSWORD, // .env मध्ये DB_PASS ऐवजी DB_PASSWORD वापरणे योग्य
+    database: process.env.DB_NAME,
+    ssl: {
+        rejectUnauthorized: false, // Aiven MySQL साठी हे अत्यंत आवश्यक आहे
+        minVersion: 'TLSv1.2'      // सुरक्षित कनेक्शनसाठी हे जोडा
+    },
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    connectTimeout: 60000,         // UPDATED: फोटो अपलोडसाठी वेळ वाढवून ६० सेकंद केली
+    acquireTimeout: 60000          // UPDATED: कनेक्शन मिळवण्यासाठी वेळ वाढवली
+});
+
+// --- ADDED: HOME ROUTE TO FIX 404 ON VERCEL ---
+fastify.get('/', async (request, reply) => {
+    return { 
+        success: true, 
+        message: "GK App Backend is Running Successfully!",
+        timestamp: new Date().toISOString() 
+    };
 });
 
 const generateTripId = (name) => {
@@ -42,7 +66,14 @@ const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
 });
-const upload = multer({ storage });
+
+// --- UPDATED: MULTER LIMITS TO PREVENT TIMEOUT ---
+const upload = multer({ 
+    storage,
+    limits: {
+        fileSize: 10 * 1024 * 1024 // UPDATED: १० MB पर्यंत फोटोला परवानगी दिली
+    }
+});
 
 // --- ROUTES ---
 
@@ -264,10 +295,25 @@ fastify.delete('/api/admin/delete-party/:id', async (request, reply) => {
     }
 });
 
-fastify.listen({ port: 5000, host: '0.0.0.0' }, (err) => {
-    if (err) {
+// --- VERCEL ADAPTER (REQUIRED FOR DEPLOYMENT) ---
+const handler = async (req, res) => {
+    await fastify.ready();
+    fastify.server.emit('request', req, res);
+};
+
+const start = async () => {
+    try {
+        // Vercel uses process.env.PORT
+        await fastify.listen({ port: process.env.PORT || 5000, host: '0.0.0.0' });
+        console.log(`✅ Backend is LIVE on port ${process.env.PORT || 5000}`);
+    } catch (err) {
         fastify.log.error(err);
         process.exit(1);
     }
-    console.log("✅ Backend is LIVE on http://192.168.31.247:5000");
-});
+};
+
+if (process.env.NODE_ENV !== 'production') {
+    start();
+}
+
+module.exports = handler;
