@@ -15,7 +15,7 @@ fastify.register(cors, { origin: true });
 
 // 2. THE ULTIMATE FIX: Catch-all Content Type Parser
 fastify.addContentTypeParser('*', (req, payload, done) => {
-  done();
+  done(null, payload);
 });
 
 // 3. Register Multer Content Parser
@@ -45,6 +45,16 @@ const db = mysql.createPool({
     connectTimeout: 60000,
     acquireTimeout: 60000
 });
+
+db.getConnection()
+    .then(conn => {
+        console.log("✅ Database Connected to Aiven Successfully!");
+        conn.release();
+    })
+    .catch(err => {
+        console.error("❌ DATABASE CONNECTION ERROR:", err.message);
+        console.error("Attempted Host:", process.env.DB_HOST);
+    });
 
 // --- HOME ROUTE ---
 fastify.get('/', async (request, reply) => {
